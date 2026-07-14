@@ -43,6 +43,15 @@ resource "google_cloud_run_v2_service" "mcp_service" {
         container_port = 8080
       }
 
+      args = [
+        "src.mcp_server.server:MCPServerApplication.create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080"
+      ]
+
       resources {
         limits = {
           cpu    = "1"
@@ -54,6 +63,12 @@ resource "google_cloud_run_v2_service" "mcp_service" {
       env {
         name  = "GOOGLE_CLOUD_PROJECT"
         value = var.project_id
+      }
+
+      # Disable FastMCP local DNS-rebinding protection for Cloud Run service domains
+      env {
+        name  = "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION"
+        value = "false"
       }
     }
   }

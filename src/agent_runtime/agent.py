@@ -1,8 +1,11 @@
 import asyncio
 import logging
 from typing import Optional
+from google.genai import types
 from google.adk.agents.llm_agent import LlmAgent
-from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, SseServerParams
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, SseConnectionParams
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -16,10 +19,19 @@ class AlphaVantageAgentRuntime:
     def __init__(self, mcp_server_url: str) -> None:
         if not mcp_server_url:
             raise ValueError("MCP Server URL must not be empty.")
-        # Ensure url ends with /sse or similar if the server uses that path
+        # Ensure url ends with /sse (which Starlette uses for FastMCP transport)
         self.mcp_server_url = mcp_server_url.rstrip("/")
+        if not self.mcp_server_url.endswith("/sse") and not "localhost" in self.mcp_server_url:
+            self.mcp_server_url = f"{self.mcp_server_url}/sse"
+            
         self.agent: Optional[LlmAgent] = None
-        self.exit_stack = None
+        self.toolset: Optional[McpToolset] = None
+        self.runner: Optional[Runner] = None
+        self.session_service: Optional[InMemorySessionService] = None
+        self.app_name = "alphavantage_stock_agent_app"
+        self.user_id = "default_user"
+        self.session_id = "default_session"
+        
         logger.info(f"Initialized AlphaVantageAgentRuntime with MCP Server URL: {self.mcp_server_url}")
 
     async def initialize_agent(self) -> None:
@@ -27,18 +39,16 @@ class AlphaVantageAgentRuntime:
         Connects to the remote Cloud Run MCP server over SSE, discovers tools,
         and initializes the ADK LlmAgent with these tools.
         """
-        logger.info("Connecting to MCP SSE Server and discovering tools...")
+        logger.info("Configuring McpToolset over SSE Connection...")
         try:
-            # SseServerParams configures connection parameters for the remote Cloud Run service
-            connection_params = SseServerParams(
+            # SseConnectionParams configures connection parameters for the remote Cloud Run service
+            connection_params = SseConnectionParams(
                 url=self.mcp_server_url,
                 headers={}
             )
 
-            # MCPToolset handles the handshake and translates MCP tools to ADK-compatible tools
-            tools, exit_stack = await MCPToolset.from_server(connection_params=connection_params)
-            self.exit_stack = exit_stack
-            logger.info(f"Successfully loaded {len(tools)} tools from MCP server.")
+            # McpToolset manages the session connection and exposes discovered tools directly
+            self.toolset = McpToolset(connection_params=connection_params)
 
             # Create and configure the LlmAgent
             self.agent = LlmAgent(
@@ -50,38 +60,77 @@ class AlphaVantageAgentRuntime:
                     "Always use the 'get_stock_quote' tool to verify real-time data before answering user queries. "
                     "Provide precise, professional, and clear summaries of stock performances."
                 ),
-                tools=tools
+                tools=[self.toolset]
             )
-            logger.info("ADK LlmAgent created successfully and equipped with MCP tools.")
+            
+            # Setup ADK 2.0 Session Service and Runner
+            logger.info("Initializing ADK Session Service and execution Runner...")
+            self.session_service = InMemorySessionService()
+            self.runner = Runner(
+                agent=self.agent,
+                app_name=self.app_name,
+                session_service=self.session_service
+            )
+            
+            # Initialize a conversational session (Awaited async coroutine in ADK 2.0)
+            await self.session_service.create_session(
+                app_name=self.app_name,
+                user_id=self.user_id,
+                session_id=self.session_id
+            )
+            
+            logger.info("ADK LlmAgent & Runner created successfully and session initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize cognitive agent: {e}")
-            if self.exit_stack:
-                await self.exit_stack.aclose()
             raise
 
     async def run_chat(self, prompt: str) -> str:
         """
         Runs a chat query against the initialized ADK agent.
         """
-        if not self.agent:
-            raise RuntimeError("Agent has not been initialized. Please call initialize_agent() first.")
+        if not self.runner:
+            raise RuntimeError("Agent/Runner has not been initialized. Please call initialize_agent() first.")
         
-        logger.info(f"Sending prompt to ADK Agent: '{prompt}'")
+        logger.info(f"Sending prompt to ADK Agent via Runner: '{prompt}'")
         try:
-            # Execute chat message using ADK Agent interface
-            response = await self.agent.chat(prompt)
-            return str(response)
+            # Package the user prompt into types.Content structure
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(text=prompt)]
+            )
+            
+            final_response = ""
+            # Execute agent session and iterate over streamed lifecycle events
+            async for event in self.runner.run_async(
+                user_id=self.user_id,
+                session_id=self.session_id,
+                new_message=new_message
+            ):
+                # Capture the final aggregated text response event
+                if event.is_final_response() and event.content:
+                    final_response = event.content.parts[0].text
+                    
+            if not final_response:
+                raise RuntimeError("Grounded agent did not return a final response payload.")
+                
+            return final_response
         except Exception as e:
-            logger.error(f"Error during agent chat invocation: {e}")
+            logger.error(f"Error during agent runner execution: {e}")
             raise
 
     async def close(self) -> None:
         """
         Safely disposes the MCP server connection context.
         """
-        if self.exit_stack:
-            logger.info("Closing MCP connection context stack...")
-            await self.exit_stack.aclose()
-            logger.info("MCP connection successfully closed.")
-            self.exit_stack = None
+        if self.toolset:
+            logger.info("Closing McpToolset connection...")
+            try:
+                await self.toolset.close()
+                logger.info("McpToolset connection successfully closed.")
+            except Exception as e:
+                logger.warning(f"Error during toolset shutdown: {e}")
+            self.toolset = None
             self.agent = None
+            self.runner = None
+            self.session_service = None
+stream = None

@@ -76,7 +76,8 @@ locals {
     "roles/iam.serviceAccountUser",          # User of runtime service accounts
     "roles/iam.serviceAccountAdmin",         # Create/manage runtime service accounts
     "roles/resourcemanager.projectIamAdmin", # Assign roles/permissions to runtime service accounts
-    "roles/dialogflow.admin"                 # Create and manage conversational agents (Dialogflow CX)
+    "roles/dialogflow.admin",                # Create and manage conversational agents (Dialogflow CX)
+    "roles/artifactregistry.admin"           # Create and manage Docker Artifact registries
   ]
 }
 
@@ -92,4 +93,14 @@ resource "google_storage_bucket_iam_member" "state_bucket_admin" {
   bucket = google_storage_bucket.tf_state.name
   role   = "roles/storage.admin"
   member = "serviceAccount:${google_service_account.github_deployer.email}"
+}
+
+# =================-------------------------------------------------------------
+# Declarative Artifact Registry for Docker Images
+# =================-------------------------------------------------------------
+resource "google_artifact_registry_repository" "agent_repo" {
+  location      = var.region
+  repository_id = "alphavantage-agent-repo"
+  description   = "Docker repository for the Alpha Vantage agent suite"
+  format        = "DOCKER"
 }

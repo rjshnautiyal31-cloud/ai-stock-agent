@@ -1,0 +1,7 @@
+requests>=2.20.0
+google-cloud-secret-manager>=2.16.0
+google-auth>=2.15.0
+google-adk>=2.0.0
+mcp>=1.0.0
+starlette>=0.35.0
+uvicorn>=0.20.0
