@@ -1,0 +1,73 @@
+name: "GitOps Infrastructure Pipeline"
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+    branches:
+      - "main"
+
+# Required permissions for OIDC authentication via Workload Identity Federation
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: "Validate Infrastructure"
+    runs-on: "ubuntu-latest"
+
+    steps:
+      - name: "Checkout Code"
+        uses: "actions/checkout@v4"
+
+      - name: "Set up Terraform"
+        uses: "hashicorp/setup-terraform@v3"
+        with:
+          terraform_version: "1.15.8"
+
+      - name: "Terraform Format Check"
+        run: "terraform fmt -check -recursive"
+
+      - name: "Initialize App Workspace"
+        run: "terraform init -backend=false"
+        working-directory: "terraform/app"
+
+      - name: "Validate App Workspace"
+        run: "terraform validate"
+        working-directory: "terraform/app"
+
+  deploy:
+    name: "Deploy Application Infrastructure"
+    needs: "validate"
+    if: "github.ref == 'refs/heads/main' && github.event_name == 'push'"
+    runs-on: "ubuntu-latest"
+
+    steps:
+      - name: "Checkout Code"
+        uses: "actions/checkout@v4"
+
+      # Authenticate to Google Cloud using Workload Identity Federation (WIF)
+      - name: "Authenticate to Google Cloud"
+        uses: "google-github-actions/auth@v2"
+        with:
+          workload_identity_provider: "projects/988401930376/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider"
+          service_account: "github-actions-deployer@fabled-ruler-363118.iam.gserviceaccount.com"
+
+      - name: "Set up Terraform"
+        uses: "hashicorp/setup-terraform@v3"
+        with:
+          terraform_version: "1.15.8"
+
+      - name: "Initialize Terraform Backend"
+        run: "terraform init"
+        working-directory: "terraform/app"
+
+      - name: "Terraform Plan"
+        run: "terraform plan -var='github_repository=rjshnautiyal31-cloud/ai-stock-agent' -out=tfplan"
+        working-directory: "terraform/app"
+
+      - name: "Terraform Apply"
+        run: "terraform apply -auto-approve tfplan"
+        working-directory: "terraform/app"
